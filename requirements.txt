@@ -1,0 +1,17 @@
+# Python 3.11
+
+# Core data handling
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+
+# Modeling
+scikit-learn>=1.3
+xgboost>=2.0
+imbalanced-learn>=0.11
+
+# Visualization
+matplotlib>=3.7
+
+# Parquet I/O (required by pandas .to_parquet)
+pyarrow>=14.0
