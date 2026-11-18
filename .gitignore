@@ -35,3 +35,6 @@ Thumbs.db
 # Editors
 .vscode/
 .idea/
+
+# Personal notes (kept local)
+instructions.md
