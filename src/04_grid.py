@@ -40,6 +40,7 @@ Run from anywhere:  python src/04_grid.py
 Takes roughly 20 minutes on 10 cores.
 """
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -51,6 +52,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.under_sampling import RandomUnderSampler
 from scipy.stats import loguniform, uniform
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (average_precision_score, f1_score,
                              roc_auc_score)
@@ -107,6 +109,19 @@ MODELS = {
             "clf__subsample": uniform(0.6, 0.4),        # 0.6 to 1.0
             "clf__colsample_bytree": uniform(0.6, 0.4),
             "clf__min_child_weight": [1, 5, 20],
+        },
+    },
+    "rf": {
+        # n_jobs=-1 parallelises the forest itself. Note that
+        # RandomizedSearchCV below also runs n_jobs=-1, so the two nest.
+        "estimator": lambda: RandomForestClassifier(
+            n_jobs=-1, random_state=RANDOM_SEED),
+        "params": {
+            # 54 combinations in all, so n_iter=15 samples 15 distinct ones.
+            "clf__n_estimators": [100, 200, 400],
+            "clf__max_depth": [None, 10, 20],      # None = grow unrestricted
+            "clf__min_samples_leaf": [1, 5, 20],
+            "clf__max_features": ["sqrt", 0.3],
         },
     },
 }
@@ -217,9 +232,9 @@ def build_estimator(model_key: str, strategy_key: str, y_train) -> ImbPipeline:
     BEFORE the classifier because its job is to change what the classifier
     learns from.
 
-    Reweighting is applied here, not searched: for logistic regression as
-    class_weight="balanced", for XGBoost as scale_pos_weight. Both are
-    computed from the TRAINING labels only.
+    Reweighting is applied here, not searched: as scale_pos_weight for
+    XGBoost, and as class_weight="balanced" for logistic regression and the
+    random forest. All are computed from the TRAINING labels only.
     """
     strategy = STRATEGIES[strategy_key]
     clf = MODELS[model_key]["estimator"]()
@@ -318,7 +333,164 @@ def run_condition(model_key, strategy_key, X, y, amounts):
     return rows
 
 
+def summarise(model_key: str, strategy_key: str, rows: list) -> dict:
+    """Mean metrics for one condition across its outer folds."""
+    return {
+        "model": model_key, "strategy": strategy_key,
+        "condition": f"{model_key}__{strategy_key}",
+        **{f"{k}_mean": float(np.mean([r[k] for r in rows]))
+           for k in ("roc_auc", "pr_auc", "f1_at_0.5",
+                     "precision_at_0.5", "recall_at_0.5")},
+        "pr_auc_std": float(np.std([r["pr_auc"] for r in rows], ddof=1)),
+    }
+
+
+def manifest_metadata() -> dict:
+    """Design fields, identical whether the manifest is rewritten or appended."""
+    return {
+        "design": "model x strategy conditions; nested CV on model params only",
+        "imbalance_strategy_in_search_space": False,
+        "outer": f"RepeatedStratifiedKFold({N_SPLITS_OUTER}x{N_REPEATS_OUTER})",
+        "inner": f"StratifiedKFold({N_SPLITS_INNER}) + "
+                 f"RandomizedSearchCV(n_iter={N_ITER_SEARCH})",
+        "inner_scoring": SEARCH_SCORING,
+        "random_seed": RANDOM_SEED,
+        "models": list(MODELS),
+        "strategies": {k: v["note"] for k, v in STRATEGIES.items()},
+    }
+
+
+def _order_key(d: dict):
+    """Canonical order: model order, then strategy order, then repeat/fold.
+
+    Sorting on this makes the manifest independent of the order conditions
+    happened to be run in, so a file built by appending matches one built in
+    a single full pass.
+    """
+    models, strategies = list(MODELS), list(STRATEGIES)
+    m = models.index(d["model"]) if d["model"] in models else len(models)
+    s = (strategies.index(d["strategy"]) if d["strategy"] in strategies
+         else len(strategies))
+    return (m, s, d.get("repeat", 0), d.get("fold", 0))
+
+
+def append_to_manifest(rows: list, summary: dict) -> tuple:
+    """
+    Merge one condition into grid_manifest.json, leaving the others alone.
+
+    Re-running a condition REPLACES its previous rows rather than appending a
+    second copy, so the file stays one run per condition and the operation is
+    safe to repeat.
+    """
+    condition = summary["condition"]
+    if MANIFEST_PATH.exists():
+        man = json.loads(MANIFEST_PATH.read_text())
+    else:
+        man = {"summaries": [], "folds": []}
+
+    replaced = len([r for r in man.get("folds", [])
+                    if r["condition"] == condition])
+    folds = [r for r in man.get("folds", [])
+             if r["condition"] != condition] + rows
+    summaries = [t for t in man.get("summaries", [])
+                 if t["condition"] != condition] + [summary]
+
+    # Refresh metadata: a newly added model has to show up in "models".
+    man.update(manifest_metadata())
+    man["summaries"] = sorted(summaries, key=_order_key)
+    man["folds"] = sorted(folds, key=_order_key)
+    MANIFEST_PATH.write_text(json.dumps(man, indent=2))
+    return replaced, len(man["summaries"]), len(man["folds"])
+
+
+def _show_selected(rows: list) -> None:
+    """Compact per-condition view of which hyperparameters were chosen."""
+    for key in sorted({k for r in rows for k in r["best_params"]}):
+        vals = [r["best_params"][key] for r in rows]
+        numeric = all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                      for v in vals)
+        if numeric and len({str(v) for v in vals}) > 4:
+            arr = np.array(vals, dtype=float)
+            print(f"    {key:<20} median {np.median(arr):<12.4g} "
+                  f"range {arr.min():.4g} to {arr.max():.4g}")
+        else:
+            counts = {}
+            for v in vals:
+                counts[str(v)] = counts.get(str(v), 0) + 1
+            shown = "  ".join(f"{v} x{c}" for v, c in
+                              sorted(counts.items(), key=lambda kv: -kv[1]))
+            print(f"    {key:<20} {shown}")
+
+
+def run_single(model_key: str, strategy_key: str) -> None:
+    """Run one condition and merge it into the manifest."""
+    print("=" * 92)
+    print(f"04_grid.py - SINGLE CONDITION: {model_key} / {strategy_key}")
+    print("=" * 92)
+
+    if not SAMPLE_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing {SAMPLE_PATH}\nRun `python src/01_prepare.py` first.")
+
+    df = pd.read_parquet(SAMPLE_PATH)
+    X = make_features(df)
+    y = df["is_fraud"].to_numpy()
+    amounts = df["amt"].to_numpy()
+    n_outer = N_SPLITS_OUTER * N_REPEATS_OUTER
+    fits = n_outer * (N_SPLITS_INNER * N_ITER_SEARCH + 1)
+
+    print(f"\n  rows      : {len(df):,}   positives {y.sum():,} "
+          f"({y.mean():.3%})")
+    print(f"  outer     : {n_outer} folds")
+    print(f"  inner     : StratifiedKFold({N_SPLITS_INNER}) + "
+          f"RandomizedSearchCV(n_iter={N_ITER_SEARCH}) on {SEARCH_SCORING}")
+    print(f"  => {fits} fits")
+    print(f"  strategy  : {STRATEGIES[strategy_key]['note']}")
+    print(f"\n  Appending to {MANIFEST_PATH.name}; other conditions untouched.")
+    print(flush=True)
+
+    t0 = time.time()
+    rows = run_condition(model_key, strategy_key, X, y, amounts)
+    wall = time.time() - t0
+
+    s = summarise(model_key, strategy_key, rows)
+    secs = np.array([r["seconds"] for r in rows])
+    print(f"\n  WALL CLOCK : {wall:.1f}s = {wall / 60:.1f} min")
+    print(f"  per fold   : mean {secs.mean():.1f}s  min {secs.min():.1f}s  "
+          f"max {secs.max():.1f}s")
+    print(f"\n  AUPRC      : {s['pr_auc_mean']:.4f} (sd {s['pr_auc_std']:.4f})")
+    print(f"  ROC-AUC    : {s['roc_auc_mean']:.4f}")
+    print(f"  F1@0.5     : {s['f1_at_0.5_mean']:.4f}  "
+          f"prec {s['precision_at_0.5_mean']:.1%}  "
+          f"recall {s['recall_at_0.5_mean']:.1%}")
+    print(f"\n  selected hyperparameters across {len(rows)} folds:")
+    _show_selected(rows)
+
+    replaced, n_s, n_f = append_to_manifest(rows, s)
+    if replaced:
+        print(f"\n  replaced {replaced} existing rows for this condition")
+    print(f"\n  {MANIFEST_PATH.name}: {n_s} conditions, {n_f} folds")
+    print("=" * 92)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the model x strategy grid, or a single condition.")
+    parser.add_argument("--model", choices=list(MODELS),
+                        help="run only this model (requires --strategy)")
+    parser.add_argument("--strategy", choices=list(STRATEGIES),
+                        help="run only this strategy (requires --model)")
+    args = parser.parse_args()
+
+    if bool(args.model) != bool(args.strategy):
+        parser.error("--model and --strategy must be given together")
+
+    # One condition: run it and APPEND. The full loop below overwrites the
+    # manifest, which would discard every condition not in this run.
+    if args.model:
+        run_single(args.model, args.strategy)
+        return
+
     print("=" * 92)
     print("04_grid.py - model x imbalance strategy, nested CV within each")
     print("=" * 92)
@@ -384,15 +556,7 @@ def main() -> None:
     for model_key, strategy_key in conditions:
         rows = [r for r in all_rows
                 if r["model"] == model_key and r["strategy"] == strategy_key]
-        s = {
-            "model": model_key, "strategy": strategy_key,
-            "condition": f"{model_key}__{strategy_key}",
-            **{f"{k}_mean": float(np.mean([r[k] for r in rows]))
-               for k in ("roc_auc", "pr_auc", "f1_at_0.5",
-                         "precision_at_0.5", "recall_at_0.5")},
-            "pr_auc_std": float(np.std([r["pr_auc"] for r in rows], ddof=1)),
-        }
-        summaries.append(s)
+        summaries.append(summarise(model_key, strategy_key, rows))
 
     for s in sorted(summaries, key=lambda d: -d["pr_auc_mean"]):
         print(f"{s['model']:>8} {s['strategy']:>13} {s['pr_auc_mean']:>8.4f} "
@@ -471,15 +635,7 @@ def main() -> None:
     print(f"  chosen value.")
 
     MANIFEST_PATH.write_text(json.dumps({
-        "design": "model x strategy conditions; nested CV on model params only",
-        "imbalance_strategy_in_search_space": False,
-        "outer": f"RepeatedStratifiedKFold({N_SPLITS_OUTER}x{N_REPEATS_OUTER})",
-        "inner": f"StratifiedKFold({N_SPLITS_INNER}) + "
-                 f"RandomizedSearchCV(n_iter={N_ITER_SEARCH})",
-        "inner_scoring": SEARCH_SCORING,
-        "random_seed": RANDOM_SEED,
-        "models": list(MODELS),
-        "strategies": {k: v["note"] for k, v in STRATEGIES.items()},
+        **manifest_metadata(),
         "summaries": summaries,
         "folds": all_rows,
     }, indent=2))
