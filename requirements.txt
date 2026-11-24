@@ -5,6 +5,9 @@ pandas>=2.0
 numpy>=1.24
 scipy>=1.10
 
+# Statistics (OLS fits in 07_h2_test.py)
+statsmodels>=0.14
+
 # Modeling
 scikit-learn>=1.3
 xgboost>=2.0

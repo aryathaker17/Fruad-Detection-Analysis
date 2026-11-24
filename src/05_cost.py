@@ -72,6 +72,26 @@ DEFAULT_THRESHOLD = 0.5
 # All costs are expressed per this many transactions.
 COST_BASIS = 100_000
 
+# The DENSE sweep. FEES above drives the detailed per-condition tables that
+# the paper quotes; this grid exists to trace how the comparison behaves as a
+# continuous function of the fee, which five points cannot show.
+#
+# Log-spaced, not evenly spaced: the fee enters the cost as "fee * number
+# flagged", so what moves the optimal threshold is the fee's ORDER OF
+# MAGNITUDE, not its absolute size. Going from $0.25 to $0.50 changes the
+# decision far more than going from $40 to $50. Geometric spacing puts equal
+# resolution on each doubling, so the grid is dense where the behaviour
+# actually changes.
+#
+# The range brackets the published span for card-fraud review (roughly $1-$25)
+# with a margin on both sides, so any crossover inside that span is interior
+# to the grid rather than sitting on an endpoint.
+DENSE_FEE_MIN = 0.25
+DENSE_FEE_MAX = 50.00
+DENSE_FEE_COUNT = 25
+DENSE_FEES = [float(f) for f in np.geomspace(
+    DENSE_FEE_MIN, DENSE_FEE_MAX, DENSE_FEE_COUNT)]
+
 
 def total_cost(probabilities, labels, amounts, threshold, review_fee):
     """
@@ -158,6 +178,88 @@ def cost_minimising_threshold(probabilities, labels, amounts, review_fee):
     # trusting costs[k].
     return threshold, total_cost(probabilities, labels, amounts,
                                  threshold, review_fee)
+
+
+def cost_curve(folds_subset):
+    """
+    Presort a pool of folds ONCE so its cost at any (threshold, fee) is cheap.
+
+    This is cost_minimising_threshold's inner machinery, kept instead of
+    thrown away. Look again at the cost of flagging the top k rows:
+
+        cost(k) = (all fraud money - fraud money inside the top k) + fee * k
+
+    The sort order, and the cumulative fraud recovered, never mention the fee.
+    Only the "+ fee * k" term does. So one sort serves every fee, and each
+    extra fee costs an argmin over an array that already exists rather than a
+    fresh sort of 320,000 rows. Over the 25-fee sweep that is the difference
+    between 4,500 sorts and 180.
+
+    Returned fields:
+      p_desc      : probabilities, descending
+      recovered   : cumsum of fraud dollars, with 0 prepended, so
+                    recovered[k] is the fraud money inside the top k rows
+      total_fraud : all the fraud money in the pool
+      k           : 0..n, as floats, for the "+ fee * k" term
+
+    Nothing here is an approximation: cost_curve + curve_argmin reproduce
+    cost_minimising_threshold's threshold and cost exactly.
+    """
+    y_prob = np.concatenate([f["y_prob"] for f in folds_subset])
+    y_true = np.concatenate([f["y_true"] for f in folds_subset])
+    amt = np.concatenate([f["amt"] for f in folds_subset])
+
+    order = np.argsort(-y_prob, kind="mergesort")   # stable, descending
+    p_desc = y_prob[order]
+    fraud_value = amt[order] * (y_true[order] == 1)
+
+    return {
+        "n": int(len(p_desc)),
+        "p_desc": p_desc,
+        "recovered": np.concatenate([[0.0], np.cumsum(fraud_value)]),
+        "total_fraud": float(fraud_value.sum()),
+        "k": np.arange(len(p_desc) + 1, dtype=float),
+    }
+
+
+def curve_cost(curve, threshold, review_fee):
+    """
+    Raw cost of operating a presorted pool at an arbitrary threshold.
+
+    Equivalent to total_cost(), but O(log n) instead of O(n): because p_desc
+    is already sorted, "how many rows clear this threshold" is a binary
+    search, and the fraud money among them is one lookup in `recovered`.
+
+    searchsorted needs an ASCENDING array, so both sides are negated: the
+    count of -p <= -threshold is exactly the count of p >= threshold, which
+    is the >= rule total_cost() uses.
+    """
+    m = int(np.searchsorted(-curve["p_desc"], -threshold, side="right"))
+    return (curve["total_fraud"] - curve["recovered"][m]) + review_fee * m
+
+
+def curve_argmin(curve, review_fee):
+    """
+    The exact cost-minimising threshold for a presorted pool, and its cost.
+
+    The fee-dependent part of the whole calculation, and all it does is add
+    `fee * k` to an array that is already built and take the minimum.
+
+    Ties are handled as in cost_minimising_threshold: if the k-th and
+    (k+1)-th rows share a probability then a >= cutoff flags both, so the
+    cost is recomputed at the threshold actually returned rather than read
+    off costs[k]. That keeps the reported threshold and the reported cost
+    consistent with each other.
+    """
+    costs = (curve["total_fraud"] - curve["recovered"]) + review_fee * curve["k"]
+    k = int(np.argmin(costs))
+
+    if k == 0:
+        # Flag nothing: any threshold above the highest score does this.
+        return float(np.nextafter(curve["p_desc"][0], np.inf)), float(costs[0])
+
+    threshold = float(curve["p_desc"][k - 1])
+    return threshold, curve_cost(curve, threshold, review_fee)
 
 
 def pooled_threshold(selection_folds, review_fee):
@@ -372,6 +474,153 @@ def rank_asc(values):
     return ranks
 
 
+def dense_sweep(conditions, names, fees):
+    """
+    Rank agreement and the cheapest condition, traced across a dense fee grid.
+
+    WHAT THIS ADDS OVER THE FIVE-FEE BLOCK
+      Five fees give five snapshots. They can tell you that the cost-best
+      condition differs from the F1-best one, but not WHERE the cost-best
+      condition changes hands, nor whether rho drifts smoothly with the fee
+      or jumps. Those are properties of a curve, and five points do not
+      resolve a curve. This sweep computes only the quantities needed for
+      that - the two rank correlations and the cost-best condition - and
+      deliberately skips the per-condition tables, the regret, the nested
+      regret and the leaky comparator, all of which the five-fee block
+      already reports in full.
+
+    WHAT IS NOT RECOMPUTED PER FEE, AND WHY IT MATTERS
+      Neither F1 at 0.5 nor AUPRC involves the review fee: one is scored at
+      a fixed cutoff, the other integrates over all cutoffs without pricing
+      any of them. So the F1 ranking and the AUPRC ranking are IDENTICAL at
+      every fee in the sweep, and are computed once here.
+
+      That is not just an optimisation, it is the finding. Every movement in
+      rho across these 25 fees comes from the cost ranking rearranging
+      itself. The metrics are a fixed yardstick; the money is what moves.
+      A metric that cannot respond to the review fee cannot track a cost
+      that depends on it.
+
+    COST, HOWEVER, IS RECOMPUTED PROPERLY AT EVERY FEE
+      Threshold selection stays held out exactly as score_condition does it:
+      for each fold, the cutoff is chosen on the other four folds of the
+      same repeat and scored on the fold they exclude. Within a repeat the
+      five folds partition the data, so the selection pool shares no rows
+      with the fold being graded. The sweep changes how fast this is
+      computed, never what is computed - see cost_curve.
+    """
+    fees = [float(f) for f in fees]
+
+    # ---- the fee-invariant side, computed once --------------------------
+    f1_vals, auprc_vals = [], []
+    for c in names:
+        f1_vals.append(float(np.mean([
+            f1_score(fd["y_true"],
+                     (fd["y_prob"] >= DEFAULT_THRESHOLD).astype(int),
+                     zero_division=0)
+            for fd in conditions[c]])))
+        auprc_vals.append(float(np.mean([
+            average_precision_score(fd["y_true"], fd["y_prob"])
+            for fd in conditions[c]])))
+
+    f1_rank = rank_desc(f1_vals)        # 1 = highest F1
+    auprc_rank = rank_desc(auprc_vals)  # 1 = highest AUPRC
+    f1_best = names[int(np.argmax(f1_vals))]
+    auprc_best = names[int(np.argmax(auprc_vals))]
+
+    # ---- the fee-dependent side: one sort per condition-fold ------------
+    held_costs = {fee: {c: [] for c in names} for fee in fees}
+
+    for c in names:
+        for fd in conditions[c]:
+            others = [f for f in conditions[c]
+                      if f["repeat"] == fd["repeat"]
+                      and f["name"] != fd["name"]]
+            selection = cost_curve(others)   # picks the threshold
+            held = cost_curve([fd])          # grades it
+            n = len(fd["y_true"])
+
+            for fee in fees:
+                thr, _ = curve_argmin(selection, fee)
+                held_costs[fee][c].append(
+                    per_basis(curve_cost(held, thr, fee), n))
+
+            # Release both before the next fold: a selection curve holds
+            # ~8 MB of sorted arrays and there are 180 condition-folds.
+            del selection, held
+
+    # ---- rank and correlate at each fee ---------------------------------
+    rows = []
+    for fee in fees:
+        cost_vals = [float(np.mean(held_costs[fee][c])) for c in names]
+        cost_rank = rank_asc(cost_vals)      # 1 = cheapest
+
+        rho_f1, p_f1 = spearmanr(f1_rank, cost_rank)
+        rho_auprc, p_auprc = spearmanr(auprc_rank, cost_rank)
+        cost_best = names[int(np.argmin(cost_vals))]
+
+        # The margin to the runner-up. Printed at every handover below,
+        # because "the cheapest condition changed" means nothing if the two
+        # are separated by less than the fold-to-fold noise - and around
+        # these crossovers they usually are.
+        ordered = sorted(range(len(names)), key=lambda i: cost_vals[i])
+        runner_up = names[ordered[1]]
+        margin = cost_vals[ordered[1]] - cost_vals[ordered[0]]
+
+        rows.append({
+            "fee": fee,
+            "rho_f1_cost": float(rho_f1), "p_f1_cost": float(p_f1),
+            "rho_auprc_cost": float(rho_auprc),
+            "p_auprc_cost": float(p_auprc),
+            "cost_best": cost_best,
+            "cost_best_value": float(min(cost_vals)),
+            "cost_runner_up": runner_up,
+            "cost_margin": float(margin),
+            "cost_margin_pct": float(margin / cost_vals[ordered[0]]),
+            "f1_best_cost": float(cost_vals[names.index(f1_best)]),
+            "same_winner_f1": bool(cost_best == f1_best),
+            "same_winner_auprc": bool(cost_best == auprc_best),
+            "cost_rank": cost_rank.tolist(),
+            "cost": dict(zip(names, cost_vals)),
+        })
+
+    return {
+        "conditions": names,
+        "f1_05": dict(zip(names, f1_vals)),
+        "auprc": dict(zip(names, auprc_vals)),
+        "f1_rank": f1_rank.tolist(),
+        "auprc_rank": auprc_rank.tolist(),
+        "f1_best": f1_best,
+        "auprc_best": auprc_best,
+        "rows": rows,
+    }
+
+
+def switch_points(rows):
+    """
+    Collapse the per-fee cost-best column into runs.
+
+    A sweep of 25 fees where the same condition wins 11 times in a row is
+    better read as "this condition owns $2.28-$13.32" than as 11 identical
+    rows. Each run records the bracketing fees where the handover happens;
+    the true crossover lies between the last fee of one run and the first
+    fee of the next, and the grid cannot localise it closer than that.
+    """
+    runs = []
+    for r in rows:
+        if runs and runs[-1]["condition"] == r["cost_best"]:
+            runs[-1]["fee_hi"] = r["fee"]
+            runs[-1]["n_fees"] += 1
+        else:
+            runs.append({"condition": r["cost_best"], "fee_lo": r["fee"],
+                         "fee_hi": r["fee"], "n_fees": 1})
+    # Record the open interval in which each handover must fall.
+    for a, b in zip(runs, runs[1:]):
+        a["switches_to"] = b["condition"]
+        a["crossover_between"] = [a["fee_hi"], b["fee_lo"]]
+    return runs
+
+
 def main() -> None:
     print("=" * 100)
     print("05_cost.py - cost evaluation across every model x strategy condition")
@@ -567,6 +816,125 @@ def main() -> None:
                     for f in FEES},
     }, indent=2, default=float))
     print(f"\n  wrote {out.relative_to(PROJECT_ROOT)}")
+    # Closes the five-fee report at the exact line it always has, so the
+    # output the paper was written against is byte-identical above here.
+    print("=" * 100)
+
+    # ---- Dense fee sweep -------------------------------------------------
+    # Deliberately AFTER the write above: the five-fee tables the paper
+    # depends on are already on disk before this starts, so a failure here
+    # cannot cost them.
+    print("\n" + "=" * 100)
+    print(f"DENSE FEE SWEEP - {len(DENSE_FEES)} FEES LOG-SPACED FROM "
+          f"${DENSE_FEE_MIN:.2f} TO ${DENSE_FEE_MAX:.2f}")
+    print("=" * 100)
+    sweep = dense_sweep(conditions, names, DENSE_FEES)
+    srows = sweep["rows"]
+
+    print(f"  Thresholds held out exactly as above. Costs per "
+          f"{COST_BASIS:,} transactions.")
+    print(f"  F1@0.5 and AUPRC do not depend on the fee, so their rankings "
+          f"are FIXED across")
+    print(f"  the whole sweep - every movement in rho below is the cost "
+          f"ranking rearranging.")
+    print(f"    F1-best    at every fee : {sweep['f1_best']}")
+    print(f"    AUPRC-best at every fee : {sweep['auprc_best']}")
+    print("\n" + "-" * 100)
+    print(f"{'fee':>10} {'rho(F1)':>9} {'p':>8} {'rho(AUPRC)':>11} {'p':>8} "
+          f"{'cost-best':>20} {'its cost':>11} {'=F1?':>5}")
+    print("-" * 100)
+    for r in srows:
+        print(f"${r['fee']:>9.4f} {r['rho_f1_cost']:>+9.4f} "
+              f"{r['p_f1_cost']:>8.4f} {r['rho_auprc_cost']:>+11.4f} "
+              f"{r['p_auprc_cost']:>8.4f} {r['cost_best']:>20} "
+              f"${r['cost_best_value']:>10,.0f} "
+              f"{'YES' if r['same_winner_f1'] else 'no':>5}")
+    print("-" * 100)
+
+    runs = switch_points(srows)
+    print(f"\n  WHICH CONDITION IS CHEAPEST, AS A FUNCTION OF THE FEE")
+    for run in runs:
+        span = (f"${run['fee_lo']:.4f}" if run["n_fees"] == 1
+                else f"${run['fee_lo']:.4f} - ${run['fee_hi']:.4f}")
+        print(f"    {run['condition']:>20}  {span:>22}  "
+              f"({run['n_fees']} of {len(srows)} fees)")
+    if len(runs) > 1:
+        print(f"\n  Handovers are bracketed, not pinpointed - the grid "
+              f"localises each one")
+        print(f"  only to the gap between two adjacent fees. The margin to "
+              f"the runner-up is")
+        print(f"  shown at both bracketing fees: a handover across a margin "
+              f"much smaller than")
+        print(f"  the fold-to-fold spread is a reordering of noise, not a "
+              f"real crossover.")
+        by_fee = {r["fee"]: r for r in srows}
+        for run in runs[:-1]:
+            lo, hi = run["crossover_between"]
+            print(f"    {run['condition']} -> {run['switches_to']}"
+                  f"  somewhere in (${lo:.4f}, ${hi:.4f})")
+            for f in (lo, hi):
+                r = by_fee[f]
+                print(f"        at ${f:>8.4f}  {r['cost_best']} beats "
+                      f"{r['cost_runner_up']} by ${r['cost_margin']:,.0f} "
+                      f"({r['cost_margin_pct']:+.2%})")
+
+    rho_f1_arr = np.array([r["rho_f1_cost"] for r in srows])
+    rho_ap_arr = np.array([r["rho_auprc_cost"] for r in srows])
+    n_same_f1 = sum(r["same_winner_f1"] for r in srows)
+    n_same_ap = sum(r["same_winner_auprc"] for r in srows)
+    n_sig_f1 = sum(r["p_f1_cost"] < 0.05 for r in srows)
+    n_sig_ap = sum(r["p_auprc_cost"] < 0.05 for r in srows)
+
+    print(f"\n  ACROSS THE SWEEP")
+    print(f"    rho(F1, cost)    : mean {rho_f1_arr.mean():+.4f}, range "
+          f"{rho_f1_arr.min():+.4f} to {rho_f1_arr.max():+.4f}, "
+          f"p<0.05 at {n_sig_f1}/{len(srows)} fees")
+    print(f"    rho(AUPRC, cost) : mean {rho_ap_arr.mean():+.4f}, range "
+          f"{rho_ap_arr.min():+.4f} to {rho_ap_arr.max():+.4f}, "
+          f"p<0.05 at {n_sig_ap}/{len(srows)} fees")
+    print(f"    the F1-best condition was also the cheapest at "
+          f"{n_same_f1}/{len(srows)} fees")
+    print(f"    the AUPRC-best condition was also the cheapest at "
+          f"{n_same_ap}/{len(srows)} fees")
+    print(f"    distinct conditions that are cheapest somewhere : "
+          f"{len({r['cost_best'] for r in srows})} of {len(names)}")
+
+    sweep_out = TABLE_DIR / "fee_sweep_dense.json"
+    sweep_out.write_text(json.dumps({
+        "fee_min": DENSE_FEE_MIN,
+        "fee_max": DENSE_FEE_MAX,
+        "n_fees": len(DENSE_FEES),
+        "spacing": "geometric (np.geomspace), log-spaced in the fee",
+        "fees": DENSE_FEES,
+        "cost_basis": COST_BASIS,
+        "units": f"dollars per {COST_BASIS:,} transactions",
+        "threshold_selection": "held out: other folds of the same repeat",
+        "note": "F1@0.5 and AUPRC are fee-invariant, so their rankings are "
+                "identical at every fee; only the cost ranking moves.",
+        "conditions": sweep["conditions"],
+        "f1_05": sweep["f1_05"],
+        "auprc": sweep["auprc"],
+        "f1_rank": sweep["f1_rank"],
+        "auprc_rank": sweep["auprc_rank"],
+        "f1_best": sweep["f1_best"],
+        "auprc_best": sweep["auprc_best"],
+        "rows": srows,
+        "cost_best_runs": runs,
+        "summary": {
+            "rho_f1_mean": float(rho_f1_arr.mean()),
+            "rho_f1_min": float(rho_f1_arr.min()),
+            "rho_f1_max": float(rho_f1_arr.max()),
+            "rho_auprc_mean": float(rho_ap_arr.mean()),
+            "rho_auprc_min": float(rho_ap_arr.min()),
+            "rho_auprc_max": float(rho_ap_arr.max()),
+            "n_fees_f1_best_is_cheapest": int(n_same_f1),
+            "n_fees_auprc_best_is_cheapest": int(n_same_ap),
+            "n_fees_p_f1_below_05": int(n_sig_f1),
+            "n_fees_p_auprc_below_05": int(n_sig_ap),
+            "n_distinct_cost_best": len({r["cost_best"] for r in srows}),
+        },
+    }, indent=2, default=float))
+    print(f"\n  wrote {sweep_out.relative_to(PROJECT_ROOT)}")
     print("=" * 100)
 
 

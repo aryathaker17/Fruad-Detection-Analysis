@@ -1,0 +1,309 @@
+{
+  "hypothesis": "H2: metric-vs-cost rank agreement peaks at intermediate review fees",
+  "operationalisation": "negative quadratic coefficient in rho ~ log(fee) + log(fee)^2",
+  "support_criteria": [
+    "b2 < 0",
+    "p(b2) < 0.05",
+    "implied vertex inside the sampled fee range"
+  ],
+  "method": "statsmodels OLS",
+  "alpha": 0.05,
+  "source": "fee_sweep_dense.json",
+  "n_fees": 25,
+  "fee_min": 0.25,
+  "fee_max": 50.0,
+  "fees": [
+    0.25,
+    0.31175703219546474,
+    0.3887697884932963,
+    0.48480686187171446,
+    0.6045677937804893,
+    0.7539130445998606,
+    0.9401507732715985,
+    1.1723944595656994,
+    1.4620088691064332,
+    1.8231661843042772,
+    2.2735395152713256,
+    2.8351677274404166,
+    3.5355339059327378,
+    4.408910230960121,
+    5.498035075281394,
+    6.856204391905184,
+    8.549879733383488,
+    10.66194052523115,
+    13.29573974236247,
+    16.58016145168888,
+    20.67592771000069,
+    25.783463443031142,
+    32.15270417087862,
+    40.09532651748743,
+    50.0
+  ],
+  "n_conditions": 12,
+  "rho_lattice_step": 0.006993006993006993,
+  "threshold_selection": "held out: other folds of the same repeat",
+  "rho_f1_cost": [
+    0.5944055944055945,
+    0.6293706293706295,
+    0.6293706293706295,
+    0.6153846153846154,
+    0.6293706293706295,
+    0.6363636363636365,
+    0.5664335664335665,
+    0.6363636363636365,
+    0.6643356643356644,
+    0.6643356643356644,
+    0.5804195804195805,
+    0.6713286713286714,
+    0.6713286713286714,
+    0.6433566433566434,
+    0.6433566433566434,
+    0.6853146853146854,
+    0.6853146853146854,
+    0.6503496503496504,
+    0.6923076923076924,
+    0.6923076923076924,
+    0.6993006993006995,
+    0.6993006993006995,
+    0.6993006993006995,
+    0.7062937062937064,
+    0.7062937062937064
+  ],
+  "rho_auprc_cost": [
+    0.5454545454545455,
+    0.5454545454545455,
+    0.6013986013986015,
+    0.5944055944055945,
+    0.5874125874125874,
+    0.6013986013986015,
+    0.5244755244755246,
+    0.5804195804195805,
+    0.5944055944055945,
+    0.6153846153846154,
+    0.5314685314685316,
+    0.6083916083916086,
+    0.6083916083916086,
+    0.5734265734265735,
+    0.5734265734265735,
+    0.6293706293706295,
+    0.6293706293706295,
+    0.5804195804195805,
+    0.6083916083916086,
+    0.6083916083916086,
+    0.6223776223776225,
+    0.6223776223776225,
+    0.6223776223776225,
+    0.6153846153846154,
+    0.6153846153846154
+  ],
+  "independence_caveat": "The 25 rho values derive from the same 180 saved prediction files and differ only in the fee used to price thresholds, so they are not independent observations. Given those files rho(fee) is deterministic, so the residuals are not sampling error and the OLS error model is misspecified at the root. The design contains one independent replication (one sample, one set of CV folds), so the p-values omit the dominant source of uncertainty and are optimistic; no HAC or clustered standard error repairs this. Read the fits as descriptive summaries of the shape of the relationship, not as formal hypothesis tests. Measured lag-1 residual autocorrelation is mildly NEGATIVE (Durbin-Watson above 2), so the usual positive-autocorrelation argument does not apply. rho is also discrete, landing only on multiples of 0.006993 with 12 conditions.",
+  "serial_dependence": {
+    "rho(F1 rank vs cost rank)": {
+      "n_observations": 25,
+      "n_distinct_values": 14,
+      "adjacent_identical_pairs": 9,
+      "adjacent_pairs": 24,
+      "observed_min": 0.5664335664335665,
+      "observed_max": 0.7062937062937064,
+      "observed_range": 0.1398601398601399
+    },
+    "rho(AUPRC rank vs cost rank)": {
+      "n_observations": 25,
+      "n_distinct_values": 12,
+      "adjacent_identical_pairs": 8,
+      "adjacent_pairs": 24,
+      "observed_min": 0.5244755244755246,
+      "observed_max": 0.6293706293706295,
+      "observed_range": 0.1048951048951049
+    }
+  },
+  "results": {
+    "rho(F1 rank vs cost rank)": {
+      "linear": {
+        "terms": {
+          "const": {
+            "coef": 0.630739311042426,
+            "se": 0.006160284216568737,
+            "t": 102.3880212127203,
+            "p": 4.265687030394658e-32,
+            "ci_low": 0.6179957922154767,
+            "ci_high": 0.6434828298693752
+          },
+          "log_fee": {
+            "coef": 0.01973689824366412,
+            "se": 0.0030316010058005134,
+            "t": 6.510387813535003,
+            "p": 1.2115785860761421e-06,
+            "ci_low": 0.013465553751260845,
+            "ci_high": 0.026008242736067395
+          }
+        },
+        "r_squared": 0.6482381675045055,
+        "adj_r_squared": 0.6329441747873101,
+        "f_statistic": 42.38514948262498,
+        "f_pvalue": 1.211578586076164e-06,
+        "n": 25,
+        "df_resid": 23,
+        "durbin_watson": 2.4368662447465232
+      },
+      "quadratic": {
+        "terms": {
+          "const": {
+            "coef": 0.6294919922100166,
+            "se": 0.006568012208051476,
+            "t": 95.84208620050163,
+            "p": 2.4392440006774834e-30,
+            "ci_low": 0.6158707685820738,
+            "ci_high": 0.6431132158379594
+          },
+          "log_fee": {
+            "coef": 0.016383517644841028,
+            "se": 0.006270105477720102,
+            "t": 2.612957262530503,
+            "p": 0.01588266036822277,
+            "ci_low": 0.003380114761679806,
+            "ci_high": 0.02938692052800225
+          },
+          "log_fee_sq": {
+            "coef": 0.0013276883905878351,
+            "se": 0.0021637793526187135,
+            "t": 0.6135969404555971,
+            "p": 0.5457743557722952,
+            "ci_low": -0.003159715333694922,
+            "ci_high": 0.005815092114870592
+          }
+        },
+        "r_squared": 0.6541568208592285,
+        "adj_r_squared": 0.6227165318464312,
+        "f_statistic": 20.80632339584924,
+        "f_pvalue": 8.465865461593373e-06,
+        "n": 25,
+        "df_resid": 22,
+        "durbin_watson": 2.482644457649375
+      },
+      "quadratic_vs_linear": {
+        "f": 0.3765012053365009,
+        "p": 0.5457743557722787,
+        "adj_r_squared_change": -0.010227642940878967
+      },
+      "h2": {
+        "b2": 0.0013276883905878351,
+        "p_b2": 0.5457743557722952,
+        "concave": false,
+        "significant": false,
+        "vertex_log_fee": -6.169940838899409,
+        "vertex_fee": 0.0020913597239982686,
+        "vertex_kind": "minimum (trough)",
+        "vertex_inside_range": false,
+        "supported": false,
+        "reason": "b2 > 0 and not distinguishable from zero (p = 0.5458); no curvature is detectable"
+      },
+      "monotone": {
+        "slope": 0.01973689824366412,
+        "p_slope": 1.2115785860761421e-06,
+        "direction": "INCREASING in the fee",
+        "log_fee_span": 5.298317366548036,
+        "predicted_rho_change_over_range": 0.10457235072619704
+      },
+      "observed": {
+        "rho_min": 0.5664335664335665,
+        "rho_max": 0.7062937062937064,
+        "n_distinct": 14
+      }
+    },
+    "rho(AUPRC rank vs cost rank)": {
+      "linear": {
+        "terms": {
+          "const": {
+            "coef": 0.5797807409360439,
+            "se": 0.006385432042415204,
+            "t": 90.79741779175676,
+            "p": 6.717056882515239e-31,
+            "ci_low": 0.5665714683456881,
+            "ci_high": 0.5929900135263998
+          },
+          "log_fee": {
+            "coef": 0.010916210386619208,
+            "se": 0.003142400824655321,
+            "t": 3.473844043372974,
+            "p": 0.0020548871993991847,
+            "ci_low": 0.004415659005708884,
+            "ci_high": 0.017416761767529532
+          }
+        },
+        "r_squared": 0.34412377921650383,
+        "adj_r_squared": 0.31560742179113443,
+        "f_statistic": 12.067592437677762,
+        "f_pvalue": 0.0020548871993992758,
+        "n": 25,
+        "df_resid": 23,
+        "durbin_watson": 2.3379865124000987
+      },
+      "quadratic": {
+        "terms": {
+          "const": {
+            "coef": 0.5798458619995834,
+            "se": 0.006865923651406854,
+            "t": 84.45271043478189,
+            "p": 3.91602634148735e-29,
+            "ci_low": 0.5656068078526455,
+            "ci_high": 0.5940849161465214
+          },
+          "log_fee": {
+            "coef": 0.011091286482140222,
+            "se": 0.006554504488210402,
+            "t": 1.6921624666044761,
+            "p": 0.10473204237993956,
+            "ci_low": -0.0025019238494153866,
+            "ci_high": 0.024684496813695833
+          },
+          "log_fee_sq": {
+            "coef": -6.931706456885997e-05,
+            "se": 0.0022619239068037674,
+            "t": -0.03064517968989023,
+            "p": 0.9758288282756866,
+            "ci_low": -0.004760260136537448,
+            "ci_high": 0.004621626007399728
+          }
+        },
+        "r_squared": 0.344151775798337,
+        "adj_r_squared": 0.2845292099618222,
+        "f_statistic": 5.772173185937716,
+        "f_pvalue": 0.009656879598333203,
+        "n": 25,
+        "df_resid": 22,
+        "durbin_watson": 2.3377812997967
+      },
+      "quadratic_vs_linear": {
+        "f": 0.0009391270382396502,
+        "p": 0.9758288282755065,
+        "adj_r_squared_change": -0.031078211829312252
+      },
+      "h2": {
+        "b2": -6.931706456885997e-05,
+        "p_b2": 0.9758288282756866,
+        "concave": true,
+        "significant": false,
+        "vertex_log_fee": 80.00401164652662,
+        "vertex_fee": 5.562894046085597e+34,
+        "vertex_kind": "maximum (peak)",
+        "vertex_inside_range": false,
+        "supported": false,
+        "reason": "b2 < 0 but not distinguishable from zero (p = 0.9758), so the data do not support curvature in either direction"
+      },
+      "monotone": {
+        "slope": 0.010916210386619208,
+        "p_slope": 0.0020548871993991847,
+        "direction": "INCREASING in the fee",
+        "log_fee_span": 5.298317366548036,
+        "predicted_rho_change_over_range": 0.057837547068316605
+      },
+      "observed": {
+        "rho_min": 0.5244755244755246,
+        "rho_max": 0.6293706293706295,
+        "n_distinct": 12
+      }
+    }
+  },
+  "h2_supported_any": false
+}
